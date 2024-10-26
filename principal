@@ -1,0 +1,217 @@
+import pickle
+import cv2
+import mediapipe as mp
+import numpy as np
+import speech_recognition as sr
+from gtts import gTTS
+import os
+import time
+from threading import Timer
+from datetime import datetime
+
+class SistemaBidireccional:
+    def __init__(self, model_path='model.p', imagen_path='Imagenes/'):
+        # Configuración del detector de señas
+        with open(model_path, 'rb') as f:
+            model_dict = pickle.load(f)
+        self.model = model_dict['model']
+        self.labels = model_dict.get('labels', ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y'])
+
+        # Configuración de la cámara
+        self.cap = None  # Inicializamos como None
+
+        # Configurar MediaPipe
+        self.mp_hands = mp.solutions.hands
+        self.hands = self.mp_hands.Hands(max_num_hands=1)
+
+        # Configuración visual
+        self.box_color = (0, 0, 255)    # Rojo
+        self.texto_color = (0, 255, 0)  # Verde
+        self.padding = 25               # Padding para la caja
+
+        # Configuración de reconocimiento de voz
+        self.recognizer = sr.Recognizer()
+
+        # Ruta para las imágenes de señas
+        self.imagen_path = imagen_path
+
+        # Control de tiempo para reconocimiento de señas
+        self.ultima_prediccion = None
+        self.tiempo_inicio_prediccion = None
+        self.prediccion_actual = None
+
+    def iniciar_camara(self):
+        """Inicia la cámara si no está activa"""
+        if self.cap is None or not self.cap.isOpened():
+            self.cap = cv2.VideoCapture(0)
+            time.sleep(1)  # Espera para que la cámara se inicialice
+
+    def liberar_camara(self):
+        """Libera la cámara si está activa"""
+        if self.cap is not None and self.cap.isOpened():
+            self.cap.release()
+            self.cap = None
+        cv2.destroyAllWindows()
+
+    def mostrar_imagen_sena(self, letra):
+        """Muestra la imagen de la seña correspondiente"""
+        try:
+            ruta_imagen = os.path.join(self.imagen_path, f"{letra.upper()}.png")
+            if not os.path.exists(ruta_imagen):
+                print(f"Error: No se encontró el archivo en la ruta: {ruta_imagen}")
+                self.hablar(f"No encontré la imagen para la letra {letra}")
+                return
+
+            img = cv2.imread(ruta_imagen)
+            if img is None:
+                print(f"Error: No se pudo cargar la imagen: {ruta_imagen}")
+                self.hablar(f"No pude cargar la imagen para la letra {letra}")
+                return
+
+            cv2.imshow(f"Seña para la letra {letra.upper()}", img)
+            cv2.waitKey(10000)
+            cv2.destroyWindow(f"Seña para la letra {letra.upper()}")
+
+        except Exception as e:
+            print(f"Error al procesar la imagen: {str(e)}")
+
+    def hablar(self, texto):
+        """Convierte texto a voz y lo reproduce"""
+        try:
+            tts = gTTS(texto, lang='es')
+            archivo = "temp_voz.mp3"
+            tts.save(archivo)
+            os.system(f"start {archivo}")
+            time.sleep(2)
+            try:
+                os.remove(archivo)
+            except:
+                pass
+        except Exception as e:
+            print(f"Error en síntesis de voz: {str(e)}")
+
+    def reconocer_voz(self):
+        """Reconoce comandos de voz"""
+        with sr.Microphone() as source:
+            print("Escuchando...")
+            try:
+                audio = self.recognizer.listen(source, timeout=5)
+                comando = self.recognizer.recognize_google(audio, language='es-ES')
+                return comando.lower()
+            except:
+                return ""
+
+    def procesar_senas(self):
+        """Procesa y detecta señas"""
+        if self.cap is None or not self.cap.isOpened():
+            return None, None
+
+        ret, frame = self.cap.read()
+        if not ret:
+            return None, None
+
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self.hands.process(frame_rgb)
+
+        if results.multi_hand_landmarks:
+            hand = results.multi_hand_landmarks[0]
+            height, width = frame.shape[:2]
+
+            # Obtener coordenadas para el rectángulo
+            x_coords = []
+            y_coords = []
+            for landmark in hand.landmark:
+                x_coords.append(int(landmark.x * width))
+                y_coords.append(int(landmark.y * height))
+
+            x_min = max(0, min(x_coords) - self.padding)
+            y_min = max(0, min(y_coords) - self.padding)
+            x_max = min(width, max(x_coords) + self.padding)
+            y_max = min(height, max(y_coords) + self.padding)
+            cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), self.box_color, 2)
+
+            # Preparar datos para predicción
+            data_aux = []
+            x_ = []
+            y_ = []
+            for landmark in hand.landmark:
+                x_.append(landmark.x)
+                y_.append(landmark.y)
+            for landmark in hand.landmark:
+                data_aux.append(landmark.x - min(x_))
+                data_aux.append(landmark.y - min(y_))
+
+            prediction = self.model.predict([np.asarray(data_aux)])
+            letra_predicha = str(prediction[0])
+
+            cv2.putText(frame, letra_predicha,
+                       (x_min, y_min - 10),
+                       cv2.FONT_HERSHEY_SIMPLEX,
+                       1.3,
+                       self.texto_color,
+                       3)
+
+            return letra_predicha, frame
+
+        return None, frame
+
+    def run(self):
+        """Método principal que ejecuta el sistema"""
+        modo_camara = True
+        self.iniciar_camara()
+
+        while True:
+            try:
+                if modo_camara:
+                    if self.cap is None or not self.cap.isOpened():
+                        self.iniciar_camara()
+
+                    letra_predicha, frame = self.procesar_senas()
+
+                    if frame is not None:
+                        cv2.imshow('Sistema de Señas', frame)
+
+                    if letra_predicha:
+                        if letra_predicha != self.prediccion_actual:
+                            self.prediccion_actual = letra_predicha
+                            self.tiempo_inicio_prediccion = datetime.now()
+                        else:
+                            tiempo_transcurrido = (datetime.now() - self.tiempo_inicio_prediccion).total_seconds()
+                            if tiempo_transcurrido >= 5 and letra_predicha != self.ultima_prediccion:
+                                self.hablar(f"Has hecho la letra {letra_predicha}")
+                                self.ultima_prediccion = letra_predicha
+                else:
+                    self.liberar_camara()
+                    print("\nModo voz activo. Di 'robot muestra la letra' seguido de una letra.")
+                    print("Presiona 'm' para volver al modo cámara")
+
+                    comando = self.reconocer_voz()
+                    if 'robot muestra la letra' in comando:
+                        letra = comando.split()[-1].upper()
+                        self.mostrar_imagen_sena(letra)
+
+                # Manejo de teclas
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('m'):
+                    modo_camara = not modo_camara
+                    print(f"\nCambiando a modo {'cámara' if modo_camara else 'voz'}")
+                    time.sleep(1)  # Pequeña pausa para estabilizar el cambio
+                elif key == ord('q'):
+                    break
+
+            except Exception as e:
+                print(f"Error en el ciclo principal: {str(e)}")
+                time.sleep(1)  # Pausa para evitar bucles de error rápidos
+
+        # Limpieza final
+        self.liberar_camara()
+
+if __name__ == "__main__":
+    try:
+        sistema = SistemaBidireccional (
+            model_path = "C:\\Users\\User\\OneDrive\\Escritorio\\Codigos_actualizados\\model.p",
+            imagen_path= "C:\\Users\\User\\OneDrive\\Escritorio\\Codigos_actualizados\\imagenes_gestos"
+        )
+        sistema.run()
+    except Exception as e:
+        print(f"Error al iniciar el sistema: {str(e)}")
